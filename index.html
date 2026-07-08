@@ -1290,6 +1290,7 @@
             <input type="file" id="inputRestoreDb" accept="application/json" style="display:none" />
             <button class="btn" id="btnEditOrganMap">Editar mapeamento de órgãos (PBI)</button>
             <button class="btn" id="btnActionOwners">Responsabilidade das ações</button>
+            <button class="btn" id="btnRepairClosedActions">Reparar ações de tópicos encerrados</button>
           </div>
         </div>
         <div class="panel">
@@ -2416,27 +2417,66 @@
     // Aba "Ações": conclusão em lote
     // -----------------------------
     let actionsSelectedTopicId = null;
-    let actionsSelectedIds = new Set();
 
+    // Agrupa ações com o mesmo texto (recorrentes em várias reuniões) numa só entrada.
+    // Regra de prazo: NIL nunca sobrepõe um prazo já conhecido; entre dois prazos
+    // conhecidos, vence o que corresponder à data mais distante no futuro
+    // (ex.: "Setembro de 2026" vence "Julho de 2026").
     async function getPendingActionsDetail(topicId){
-      const ups = await getUpdatesByTopic(topicId);
-      const out = [];
+      const ups = await getUpdatesByTopic(topicId); // já vem ordenado por meetingDate ascendente
+      const groups = new Map();
+
       for(const u of ups){
         const acts = await getActionsByUpdate(u.id);
         for(const a of acts){
           const txt = (a.actionText || "NIL").trim();
           if(!txt || txt.toUpperCase() === "NIL") continue;
           if(a.completedDate) continue;
-          out.push({
-            actionId: a.id,
-            meetingId: u.meetingId || "",
-            meetingDate: u.meetingDate || "",
-            actionText: txt,
-            deadlineText: (a.deadlineText || "NIL").trim()
-          });
+
+          const key = txt.toLowerCase().replace(/\s+/g, " ");
+          if(!groups.has(key)){
+            groups.set(key, {
+              actionIds: [],
+              actionText: txt,
+              occurrences: 0,
+              firstMeetingId: u.meetingId || "",
+              firstMeetingDate: u.meetingDate || "",
+              lastMeetingId: u.meetingId || "",
+              lastMeetingDate: u.meetingDate || "",
+              bestDeadlineText: "NIL",
+              bestDeadlineIso: null
+            });
+          }
+          const g = groups.get(key);
+          g.actionIds.push(a.id);
+          g.occurrences++;
+          g.lastMeetingId = u.meetingId || "";
+          g.lastMeetingDate = u.meetingDate || "";
+
+          const dTxt = (a.deadlineText || "NIL").trim();
+          const upper = dTxt.toUpperCase();
+          if(upper && upper !== "NIL"){
+            const iso = parseFlexibleDeadline(dTxt) || dateFromYmdDots(dTxt);
+            if(g.bestDeadlineIso === null || (iso && iso > g.bestDeadlineIso)){
+              g.bestDeadlineText = dTxt;
+              g.bestDeadlineIso = iso;
+            }
+          }
         }
       }
-      return out;
+
+      return Array.from(groups.values())
+        .map(g => ({
+          actionIds: g.actionIds,
+          actionText: g.actionText,
+          occurrences: g.occurrences,
+          meetingId: g.lastMeetingId,
+          meetingDate: g.lastMeetingDate,
+          firstMeetingId: g.firstMeetingId,
+          firstMeetingDate: g.firstMeetingDate,
+          deadlineText: g.bestDeadlineText
+        }))
+        .sort((a,b) => (b.meetingDate || "").localeCompare(a.meetingDate || ""));
     }
 
     async function renderActionsTopicList(){
@@ -2488,7 +2528,6 @@
 
     async function selectActionsTopic(topicId, title){
       actionsSelectedTopicId = topicId;
-      actionsSelectedIds.clear();
       document.querySelectorAll("#actionsTopicList .topic").forEach(el => {
         const on = el.dataset.id === topicId;
         el.style.outline = on ? "2px solid rgba(26,90,150,.5)" : "";
@@ -2508,7 +2547,6 @@
       const items = await getPendingActionsDetail(topicId);
       if(titleEl) titleEl.textContent = title || "";
       listEl.innerHTML = "";
-      actionsSelectedIds.clear();
       if(selectAllChk) selectAllChk.checked = false;
 
       if(!items.length){
@@ -2523,19 +2561,18 @@
         for(const it of items){
           const row = document.createElement("div");
           row.style.cssText = "display:flex;gap:10px;align-items:flex-start;padding:10px 4px;border-bottom:1px solid rgba(2,6,23,.06)";
+          const recorrenteHtml = it.occurrences > 1
+            ? ` <span style="color:var(--muted);font-weight:400">(recorrente em ${it.occurrences} reuniões, desde ${escapeHtml(it.firstMeetingId || "—")} &bull; ${escapeHtml(it.firstMeetingDate || "—")})</span>`
+            : "";
           row.innerHTML = `
-            <input type="checkbox" class="actionsChk" data-action-id="${escapeHtml(it.actionId)}" style="margin-top:4px;width:16px;height:16px;flex:none" />
+            <input type="checkbox" class="actionsChk" data-action-ids="${escapeHtml(it.actionIds.join(","))}" style="margin-top:4px;width:16px;height:16px;flex:none" />
             <div style="flex:1;min-width:0">
-              <div style="color:var(--muted);font-size:12px;font-weight:700">${escapeHtml(it.meetingId || "—")} &bull; ${escapeHtml(it.meetingDate || "—")}</div>
+              <div style="color:var(--muted);font-size:12px;font-weight:700">${escapeHtml(it.meetingId || "—")} &bull; ${escapeHtml(it.meetingDate || "—")}${recorrenteHtml}</div>
               <div style="margin:2px 0">${escapeHtml(it.actionText)}</div>
               <div style="color:var(--muted);font-size:12px">Prazo: ${escapeHtml(it.deadlineText)}</div>
             </div>
           `;
-          row.querySelector(".actionsChk").addEventListener("change", (e) => {
-            const id = e.target.getAttribute("data-action-id");
-            if(e.target.checked) actionsSelectedIds.add(id); else actionsSelectedIds.delete(id);
-            updateActionsBulkBar();
-          });
+          row.querySelector(".actionsChk").addEventListener("change", updateActionsBulkBar);
           listEl.appendChild(row);
         }
       }
@@ -2545,30 +2582,30 @@
     function updateActionsBulkBar(){
       const btn = document.getElementById("btnActionsMarkDone");
       const countEl = document.getElementById("actionsSelectedCount");
-      const n = actionsSelectedIds.size;
-      if(countEl) countEl.textContent = n ? `${n} selecionada(s)` : "Nenhuma selecionada";
+      const n = document.querySelectorAll("#actionsDetailList .actionsChk:checked").length;
+      if(countEl) countEl.textContent = n ? `${n} ação(ões) selecionada(s)` : "Nenhuma selecionada";
       if(btn) btn.disabled = (n === 0);
     }
 
     document.getElementById("actionsSelectAll")?.addEventListener("change", (e) => {
       const checked = e.target.checked;
-      document.querySelectorAll("#actionsDetailList .actionsChk").forEach(chk => {
-        chk.checked = checked;
-        const id = chk.getAttribute("data-action-id");
-        if(checked) actionsSelectedIds.add(id); else actionsSelectedIds.delete(id);
-      });
+      document.querySelectorAll("#actionsDetailList .actionsChk").forEach(chk => { chk.checked = checked; });
       updateActionsBulkBar();
     });
 
     document.getElementById("btnActionsMarkDone")?.addEventListener("click", async () => {
-      if(actionsSelectedIds.size === 0) return;
+      const checkedBoxes = Array.from(document.querySelectorAll("#actionsDetailList .actionsChk:checked"));
+      if(checkedBoxes.length === 0) return;
+      const ids = [];
+      checkedBoxes.forEach(chk => {
+        (chk.getAttribute("data-action-ids") || "").split(",").filter(Boolean).forEach(id => ids.push(id));
+      });
       const dateInput = document.getElementById("actionsCompletionDate");
       const date = (dateInput && dateInput.value) || todayIso();
-      const n = actionsSelectedIds.size;
-      if(!confirm(`Confirma marcar ${n} ação(ões) como concluídas em ${date}?`)) return;
+      const n = checkedBoxes.length;
+      if(!confirm(`Confirma marcar ${n} ação(ões) (${ids.length} registo(s) associados) como concluídas em ${date}?`)) return;
 
       try{
-        const ids = Array.from(actionsSelectedIds);
         const db = await openDB();
         const rows = await Promise.all(ids.map(id => new Promise((resolve, reject) => {
           const tx = db.transaction("actions", "readonly");
@@ -2581,7 +2618,6 @@
         await putMany("actions", updated);
 
         showToast(`${updated.length} ação(ões) marcadas como concluídas em ${date}.`);
-        actionsSelectedIds.clear();
 
         await renderActionsTopicList();
         if(actionsSelectedTopicId){
@@ -2804,6 +2840,55 @@
         }
       }
       return { pending, urgency: picked };
+    }
+
+    // -----------------------------
+    // Encerramento de tópicos: concluir ações automaticamente
+    // -----------------------------
+    // Data de encerramento de um tópico: a reunião assinalada com "Encerrar",
+    // senão a última reunião conhecida, senão hoje.
+    async function getClosingDateForTopic(topicId, topicObj){
+      const ups = await getUpdatesByTopic(topicId); // ascendente por meetingDate
+      if(ups.length){
+        const withFlag = ups.slice().reverse().find(u => u.closedFlag);
+        return (withFlag && withFlag.meetingDate)
+          || ups[ups.length - 1].meetingDate
+          || (topicObj && topicObj.lastUpdateDate)
+          || todayIso();
+      }
+      return (topicObj && topicObj.lastUpdateDate) || todayIso();
+    }
+
+    // Marca como concluídas (completedDate = closeDate) todas as ações ainda
+    // em aberto de um tópico. Devolve quantas ações foram corrigidas.
+    async function closeoutTopicActions(topicId, closeDate){
+      const ups = await getUpdatesByTopic(topicId);
+      const toUpdate = [];
+      for(const u of ups){
+        const acts = await getActionsByUpdate(u.id);
+        for(const a of acts){
+          const txt = (a.actionText || "NIL").trim();
+          if(!txt || txt.toUpperCase() === "NIL") continue;
+          if(a.completedDate) continue;
+          toUpdate.push({ ...a, completedDate: closeDate || todayIso() });
+        }
+      }
+      if(toUpdate.length) await putMany("actions", toUpdate);
+      return toUpdate.length;
+    }
+
+    // Repara tópicos já encerrados que ainda tenham ações por concluir
+    // (dados antigos, de antes desta correção existir).
+    async function repairClosedTopicsActions(){
+      const topics = await getAllTopics();
+      let actionsFixed = 0, topicsFixed = 0;
+      for(const t of topics){
+        if((t.status || "").toLowerCase() !== "closed") continue;
+        const closeDate = await getClosingDateForTopic(t.id, t);
+        const n = await closeoutTopicActions(t.id, closeDate);
+        if(n > 0){ actionsFixed += n; topicsFixed++; }
+      }
+      return { actionsFixed, topicsFixed };
     }
 
     // -----------------------------
@@ -4221,6 +4306,14 @@
         await upsertTopicUpdates(remappedUpdates);
         await putMany("actions", parsed.actions);
 
+        // Tópicos que ficaram encerrados nesta importação: concluir as ações pendentes
+        for(const t of topicsToSave){
+          if((t.status || "").toLowerCase() === "closed"){
+            const closeDate = await getClosingDateForTopic(t.id, t);
+            await closeoutTopicActions(t.id, closeDate);
+          }
+        }
+
         const now = new Date();
         const stamp = now.toLocaleString("pt-PT");
         await setMeta("lastImport", stamp);
@@ -4706,6 +4799,8 @@
           db2.close();
           resolve();
         });
+        // encerrar o tópico conclui automaticamente todas as suas ações pendentes
+        await closeoutTopicActions(selectedEditorTopicId, meetingDate);
       }
       db.close();
       // refletir no UI (dashboard/ações pendentes)
@@ -4876,6 +4971,21 @@
     });
 
     // Responsabilidade das ações (manual)
+    document.getElementById("btnRepairClosedActions")?.addEventListener("click", async () => {
+      if(!confirm("Vai marcar como concluídas todas as ações ainda pendentes dos tópicos já encerrados (usando a data da última reunião de cada tópico). Continuar?")) return;
+      try{
+        const { actionsFixed, topicsFixed } = await repairClosedTopicsActions();
+        showToast(actionsFixed
+          ? `Corrigido: ${actionsFixed} ação(ões) em ${topicsFixed} tópico(s) encerrados.`
+          : "Não havia ações pendentes em tópicos encerrados.");
+        await refreshKPIs();
+        await refreshDashboardList();
+        await renderPendingActions();
+      }catch(err){
+        alert("Falha ao reparar: " + (err?.message || err));
+      }
+    });
+
     document.getElementById("btnActionOwners")?.addEventListener("click", async ()=>{
       // construir lista com última ação (não-NIL) por tópico
       const [topics, updates, actions] = await Promise.all([getAllTopics(), getAllUpdates(), getAllActions()]);
