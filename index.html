@@ -2489,7 +2489,8 @@
       let total = 0;
       for(const t of topics){
         if((t.status || "").toLowerCase() === "closed") continue;
-        const { pending } = await getTopicStats(t.id);
+        // conta ações distintas (recorrentes com o mesmo texto contam uma só vez)
+        const pending = (await getPendingActionsDetail(t.id)).length;
         if(pending > 0){
           rows.push({ id: t.id, title: t.title || "(sem título)", pending });
           total += pending;
@@ -5883,19 +5884,41 @@ async function _updateUrgentBadge(){
   try{
     var badge = document.getElementById("urgentBadge");
     if(!badge) return;
+    var topics  = await _getAll("topics");
+    var updates = await _getAll("topic_updates");
     var actions = await _getAll("actions");
-    var today = _todayStr();
-    var count = 0;
-    actions.forEach(function(a){
-      if(a.completedDate) return;
-      var iso = _deadlineToIso(a.deadlineDate, a.deadlineText);
-      if(iso && iso < today) count++;
+
+    var updatesByTopic = {};
+    updates.forEach(function(u){
+      if(!updatesByTopic[u.topicId]) updatesByTopic[u.topicId] = [];
+      updatesByTopic[u.topicId].push(u);
     });
+    var actionsByUpdate = {};
+    actions.forEach(function(a){
+      if(!actionsByUpdate[a.topicUpdateId]) actionsByUpdate[a.topicUpdateId] = [];
+      actionsByUpdate[a.topicUpdateId].push(a);
+    });
+
+    // Conta ações distintas (por texto) ainda pendentes, só em tópicos em vigor
+    // (não encerrados). Ações recorrentes com o mesmo texto contam uma só vez.
+    var count = 0;
+    topics.forEach(function(t){
+      if((t.status || "").toLowerCase() === "closed") return;
+      var seenTexts = {};
+      (updatesByTopic[t.id] || []).forEach(function(u){
+        (actionsByUpdate[u.id] || []).forEach(function(a){
+          var txt = (a.actionText || "NIL").trim();
+          if(!txt || txt.toUpperCase() === "NIL") return;
+          if(a.completedDate) return;
+          var key = txt.toLowerCase().replace(/\s+/g, " ");
+          if(!seenTexts[key]){ seenTexts[key] = true; count++; }
+        });
+      });
+    });
+
     badge.textContent = count;
     badge.style.display = count > 0 ? "inline-block" : "none";
-    if(count > 0){
-      badge.title = count + " ação(ões) com prazo ultrapassado";
-    }
+    badge.title = count > 0 ? (count + " ação(ões) pendente(s) em tópicos em vigor") : "";
   }catch(e){}
 }
 setInterval(_updateUrgentBadge, 30000);
