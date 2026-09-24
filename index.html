@@ -6842,225 +6842,7 @@ body.menu-collapsed .settings-main-btn{
 
 
 
-<script id="settings-exports-direct-v12-4-9">
-/* V12.4.9 — Exportações e backup diretos na página Definições.
-   Não dependem dos antigos botões ocultos/removidos. */
-(function(){
-  const DB_NAME='rcg_db';
-  const DB_VER=2;
-  const STORES=['topics','topic_updates','actions','meetings','meeting_participants','meta'];
 
-  function toast(msg){
-    try{
-      const t=document.getElementById('toast');
-      if(t){ t.textContent=msg; t.style.display='block'; setTimeout(()=>{t.style.display='none';},2400); return; }
-    }catch(_e){}
-    console.log(msg);
-  }
-  function fail(prefix,err){
-    console.error(prefix,err);
-    alert(prefix+': '+(err&&err.message?err.message:String(err||'erro desconhecido')));
-  }
-  function download(blob,name){
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url; a.download=name; a.style.display='none';
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(url),1500);
-  }
-  function openDb(){
-    return new Promise((resolve,reject)=>{
-      const req=indexedDB.open(DB_NAME,DB_VER);
-      req.onsuccess=()=>resolve(req.result);
-      req.onerror=()=>reject(req.error||new Error('Não foi possível abrir a base de dados.'));
-      req.onupgradeneeded=()=>{};
-    });
-  }
-  async function all(store){
-    const db=await openDb();
-    try{
-      if(!db.objectStoreNames.contains(store)) return [];
-      return await new Promise((resolve,reject)=>{
-        const tx=db.transaction(store,'readonly');
-        const req=tx.objectStore(store).getAll();
-        req.onsuccess=()=>resolve(req.result||[]);
-        req.onerror=()=>reject(req.error);
-      });
-    } finally { db.close(); }
-  }
-  async function snapshot(){
-    const stores={};
-    for(const s of STORES) stores[s]=await all(s);
-    return {exportedAt:new Date().toISOString(),dbName:DB_NAME,dbVer:DB_VER,stores};
-  }
-  function escCsv(v){ return '"'+String(v??'').replace(/"/g,'""').replace(/\r?\n/g,' ')+'"'; }
-  function isoDeadline(a){
-    if(a&&/^\d{4}-\d{2}-\d{2}$/.test(String(a.deadlineDate||''))) return a.deadlineDate;
-    const s=String(a&&a.deadlineText||'').trim();
-    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    let m=s.match(/^(\d{4})[.\/-](\d{2})[.\/-](\d{2})$/); if(m) return `${m[1]}-${m[2]}-${m[3]}`;
-    m=s.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})$/); if(m) return `${m[3]}-${String(m[2]).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`;
-    return '';
-  }
-  function buildOperationalRows(data){
-    const topics=new Map((data.stores.topics||[]).map(t=>[t.id,t]));
-    const updates=new Map((data.stores.topic_updates||[]).map(u=>[u.id,u]));
-    return (data.stores.actions||[]).map(a=>{
-      const u=updates.get(a.topicUpdateId)||{};
-      const t=topics.get(u.topicId)||{};
-      return {
-        Topico_Titulo:t.title||'',
-        ID_Reuniao_Origem:u.meetingId||'',
-        Data_Reuniao:u.meetingDate||'',
-        Descricao_Acao:a.actionText||'',
-        Prazo:a.deadlineDate||a.deadlineText||'',
-        Prazo_Texto:a.deadlineText||'',
-        Estado_Acao:a.completedDate?'Fechada':((String(a.actionText||'').trim().toUpperCase()==='NIL')?'Sem ação':'Aberta'),
-        Data_Conclusao:a.completedDate||'',
-        Tema_Estado:t.status||'',
-        Orgaos_Tema:Array.isArray(t.organs)?t.organs.join(', '):''
-      };
-    }).filter(r=>String(r.Descricao_Acao||'').trim().toUpperCase()!=='NIL');
-  }
-  async function exportBackup(){
-    try{
-      const data=await snapshot();
-      const stamp=new Date().toISOString().replace(/[:T]/g,'-').slice(0,16);
-      download(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}),`rcg_db_backup_${stamp}.json`);
-      toast('Backup exportado ✅');
-    }catch(e){fail('Erro ao criar backup',e);}
-  }
-  async function restoreBackup(file){
-    try{
-      if(!file) return;
-      const json=JSON.parse(await file.text());
-      if(!json||!json.stores) throw new Error('O ficheiro não contém um backup RCG válido.');
-      if(!confirm('Isto vai substituir os dados atuais. Continuar?')) return;
-      const db=await openDb();
-      try{
-        const available=STORES.filter(s=>db.objectStoreNames.contains(s));
-        await new Promise((resolve,reject)=>{
-          const tx=db.transaction(available,'readwrite');
-          available.forEach(s=>tx.objectStore(s).clear());
-          tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error); tx.onabort=()=>reject(tx.error);
-        });
-        for(const s of available){
-          const rows=Array.isArray(json.stores[s])?json.stores[s]:[];
-          if(!rows.length) continue;
-          await new Promise((resolve,reject)=>{
-            const tx=db.transaction(s,'readwrite'), st=tx.objectStore(s);
-            rows.forEach(r=>st.put(r));
-            tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error); tx.onabort=()=>reject(tx.error);
-          });
-        }
-      } finally { db.close(); }
-      toast('Base de dados restaurada ✅');
-      setTimeout(()=>location.reload(),700);
-    }catch(e){fail('Erro ao restaurar backup',e);}
-  }
-  async function exportJson(){
-    try{
-      const data=await snapshot();
-      const rows=buildOperationalRows(data);
-      const payload={
-        Reunioes:data.stores.meetings||[],
-        Participantes:data.stores.meeting_participants||[],
-        Topicos:data.stores.topics||[],
-        Atualizacoes_Topico:data.stores.topic_updates||[],
-        Acoes:rows
-      };
-      const stamp=new Date().toISOString().slice(0,10);
-      download(new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'}),`RCG_export_${stamp}.json`);
-      toast('JSON exportado ✅');
-    }catch(e){fail('Erro ao exportar JSON',e);}
-  }
-  async function exportCsv(){
-    try{
-      const rows=buildOperationalRows(await snapshot());
-      const headers=['Topico_Titulo','ID_Reuniao_Origem','Data_Reuniao','Descricao_Acao','Prazo','Prazo_Texto','Estado_Acao','Data_Conclusao','Tema_Estado','Orgaos_Tema'];
-      const lines=[headers.join(';'),...rows.map(r=>headers.map(h=>escCsv(r[h])).join(';'))];
-      const stamp=new Date().toISOString().slice(0,10);
-      // BOM para Excel/Power BI reconhecer UTF-8 corretamente
-      download(new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'}),`RCG_acoes_${stamp}.csv`);
-      toast('CSV de ações exportado ✅');
-    }catch(e){fail('Erro ao exportar CSV',e);}
-  }
-  async function exportExcel(){
-    try{
-      if(typeof XLSX==='undefined') throw new Error('A biblioteca XLSX não foi carregada. Verifique a ligação à Internet ou o bloqueio do browser.');
-      const data=await snapshot();
-      const wb=XLSX.utils.book_new();
-      const sheets=[
-        ['Reunioes',data.stores.meetings||[]],
-        ['Participantes',data.stores.meeting_participants||[]],
-        ['Topicos',data.stores.topics||[]],
-        ['Atualizacoes_Topico',data.stores.topic_updates||[]],
-        ['Acoes',buildOperationalRows(data)]
-      ];
-      sheets.forEach(([name,rows])=>{
-        const safe=rows.length?rows:[{Sem_dados:''}];
-        const ws=XLSX.utils.json_to_sheet(safe);
-        XLSX.utils.book_append_sheet(wb,ws,name);
-      });
-      const stamp=new Date().toISOString().slice(0,10);
-      XLSX.writeFile(wb,`RCG_export_${stamp}.xlsx`);
-      toast('Excel exportado ✅');
-    }catch(e){fail('Erro ao exportar Excel',e);}
-  }
-  function icsEsc(s){return String(s??'').replace(/\\/g,'\\\\').replace(/\r?\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;');}
-  function icsDate(iso){return /^\d{4}-\d{2}-\d{2}$/.test(iso||'')?iso.replace(/-/g,''):'';}
-  async function exportIcs(){
-    try{
-      const rows=buildOperationalRows(await snapshot());
-      const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//NAV//RCG//PT'];
-      let i=0;
-      for(const r of rows){
-        if(r.Estado_Acao==='Sem ação') continue;
-        const due=isoDeadline({deadlineDate:r.Prazo,deadlineText:r.Prazo_Texto});
-        lines.push('BEGIN:VTODO');
-        lines.push(`UID:rcg-${Date.now()}-${++i}@nav`);
-        lines.push(`DTSTAMP:${new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z')}`);
-        lines.push(`SUMMARY:${icsEsc((r.Topico_Titulo+' — '+r.Descricao_Acao).slice(0,220))}`);
-        lines.push(`DESCRIPTION:${icsEsc('Reunião: '+r.ID_Reuniao_Origem+'\nEstado: '+r.Estado_Acao)}`);
-        if(due) lines.push(`DUE;VALUE=DATE:${due.replace(/-/g,'')}`);
-        lines.push(r.Estado_Acao==='Fechada'?'STATUS:COMPLETED':'STATUS:NEEDS-ACTION');
-        lines.push('END:VTODO');
-      }
-      lines.push('END:VCALENDAR');
-      const stamp=new Date().toISOString().slice(0,10);
-      download(new Blob([lines.join('\r\n')],{type:'text/calendar;charset=utf-8'}),`RCG_acoes_${stamp}.ics`);
-      toast('Calendário ICS exportado ✅');
-    }catch(e){fail('Erro ao exportar calendário',e);}
-  }
-
-  window.addEventListener('load',()=>{
-    const bind=(id,fn)=>{
-      const el=document.getElementById(id); if(!el) return;
-      // captura para funcionar mesmo que exista um listener antigo inútil
-      el.addEventListener('click',e=>{e.preventDefault();e.stopImmediatePropagation();fn();},true);
-    };
-    bind('dataExportExcel',exportExcel);
-    bind('dataExportCsv',exportCsv);
-    bind('dataExportJson',exportJson);
-    bind('dataExportIcs',exportIcs);
-    bind('dataBackup',exportBackup);
-
-    const restoreBtn=document.getElementById('dataRestore');
-    if(restoreBtn){
-      restoreBtn.addEventListener('click',e=>{
-        e.preventDefault();e.stopImmediatePropagation();
-        let input=document.getElementById('directRestoreDbInput');
-        if(!input){
-          input=document.createElement('input'); input.id='directRestoreDbInput'; input.type='file'; input.accept='.json,application/json'; input.style.display='none';
-          input.addEventListener('change',async()=>{const f=input.files&&input.files[0];await restoreBackup(f);input.value='';});
-          document.body.appendChild(input);
-        }
-        input.click();
-      },true);
-    }
-  });
-})();
-</script>
 
 </body>
     </html>`;
@@ -9404,6 +9186,226 @@ body.menu-collapsed .page-shell-header{margin-left:var(--sidebar-collapsed);}
   window.addEventListener('load',function(){setTimeout(runRepairAndRefresh,1800);});
   ['btnGoDash','btnGoTopics','btnGoActions'].forEach(function(id){
     document.getElementById(id)?.addEventListener('click',function(){setTimeout(runRepairAndRefresh,100);});
+  });
+})();
+</script>
+
+<script id="settings-exports-direct-v12-4-10">
+/* V12.4.9 — Exportações e backup diretos na página Definições.
+   Não dependem dos antigos botões ocultos/removidos. */
+(function(){
+  const DB_NAME='rcg_db';
+  const DB_VER=2;
+  const STORES=['topics','topic_updates','actions','meetings','meeting_participants','meta'];
+
+  function toast(msg){
+    try{
+      const t=document.getElementById('toast');
+      if(t){ t.textContent=msg; t.style.display='block'; setTimeout(()=>{t.style.display='none';},2400); return; }
+    }catch(_e){}
+    console.log(msg);
+  }
+  function fail(prefix,err){
+    console.error(prefix,err);
+    alert(prefix+': '+(err&&err.message?err.message:String(err||'erro desconhecido')));
+  }
+  function download(blob,name){
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=name; a.style.display='none';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1500);
+  }
+  function openDb(){
+    return new Promise((resolve,reject)=>{
+      const req=indexedDB.open(DB_NAME,DB_VER);
+      req.onsuccess=()=>resolve(req.result);
+      req.onerror=()=>reject(req.error||new Error('Não foi possível abrir a base de dados.'));
+      req.onupgradeneeded=()=>{};
+    });
+  }
+  async function all(store){
+    const db=await openDb();
+    try{
+      if(!db.objectStoreNames.contains(store)) return [];
+      return await new Promise((resolve,reject)=>{
+        const tx=db.transaction(store,'readonly');
+        const req=tx.objectStore(store).getAll();
+        req.onsuccess=()=>resolve(req.result||[]);
+        req.onerror=()=>reject(req.error);
+      });
+    } finally { db.close(); }
+  }
+  async function snapshot(){
+    const stores={};
+    for(const s of STORES) stores[s]=await all(s);
+    return {exportedAt:new Date().toISOString(),dbName:DB_NAME,dbVer:DB_VER,stores};
+  }
+  function escCsv(v){ return '"'+String(v??'').replace(/"/g,'""').replace(/\r?\n/g,' ')+'"'; }
+  function isoDeadline(a){
+    if(a&&/^\d{4}-\d{2}-\d{2}$/.test(String(a.deadlineDate||''))) return a.deadlineDate;
+    const s=String(a&&a.deadlineText||'').trim();
+    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    let m=s.match(/^(\d{4})[.\/-](\d{2})[.\/-](\d{2})$/); if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+    m=s.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})$/); if(m) return `${m[3]}-${String(m[2]).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`;
+    return '';
+  }
+  function buildOperationalRows(data){
+    const topics=new Map((data.stores.topics||[]).map(t=>[t.id,t]));
+    const updates=new Map((data.stores.topic_updates||[]).map(u=>[u.id,u]));
+    return (data.stores.actions||[]).map(a=>{
+      const u=updates.get(a.topicUpdateId)||{};
+      const t=topics.get(u.topicId)||{};
+      return {
+        Topico_Titulo:t.title||'',
+        ID_Reuniao_Origem:u.meetingId||'',
+        Data_Reuniao:u.meetingDate||'',
+        Descricao_Acao:a.actionText||'',
+        Prazo:a.deadlineDate||a.deadlineText||'',
+        Prazo_Texto:a.deadlineText||'',
+        Estado_Acao:a.completedDate?'Fechada':((String(a.actionText||'').trim().toUpperCase()==='NIL')?'Sem ação':'Aberta'),
+        Data_Conclusao:a.completedDate||'',
+        Tema_Estado:t.status||'',
+        Orgaos_Tema:Array.isArray(t.organs)?t.organs.join(', '):''
+      };
+    }).filter(r=>String(r.Descricao_Acao||'').trim().toUpperCase()!=='NIL');
+  }
+  async function exportBackup(){
+    try{
+      const data=await snapshot();
+      const stamp=new Date().toISOString().replace(/[:T]/g,'-').slice(0,16);
+      download(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}),`rcg_db_backup_${stamp}.json`);
+      toast('Backup exportado ✅');
+    }catch(e){fail('Erro ao criar backup',e);}
+  }
+  async function restoreBackup(file){
+    try{
+      if(!file) return;
+      const json=JSON.parse(await file.text());
+      if(!json||!json.stores) throw new Error('O ficheiro não contém um backup RCG válido.');
+      if(!confirm('Isto vai substituir os dados atuais. Continuar?')) return;
+      const db=await openDb();
+      try{
+        const available=STORES.filter(s=>db.objectStoreNames.contains(s));
+        await new Promise((resolve,reject)=>{
+          const tx=db.transaction(available,'readwrite');
+          available.forEach(s=>tx.objectStore(s).clear());
+          tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error); tx.onabort=()=>reject(tx.error);
+        });
+        for(const s of available){
+          const rows=Array.isArray(json.stores[s])?json.stores[s]:[];
+          if(!rows.length) continue;
+          await new Promise((resolve,reject)=>{
+            const tx=db.transaction(s,'readwrite'), st=tx.objectStore(s);
+            rows.forEach(r=>st.put(r));
+            tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error); tx.onabort=()=>reject(tx.error);
+          });
+        }
+      } finally { db.close(); }
+      toast('Base de dados restaurada ✅');
+      setTimeout(()=>location.reload(),700);
+    }catch(e){fail('Erro ao restaurar backup',e);}
+  }
+  async function exportJson(){
+    try{
+      const data=await snapshot();
+      const rows=buildOperationalRows(data);
+      const payload={
+        Reunioes:data.stores.meetings||[],
+        Participantes:data.stores.meeting_participants||[],
+        Topicos:data.stores.topics||[],
+        Atualizacoes_Topico:data.stores.topic_updates||[],
+        Acoes:rows
+      };
+      const stamp=new Date().toISOString().slice(0,10);
+      download(new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'}),`RCG_export_${stamp}.json`);
+      toast('JSON exportado ✅');
+    }catch(e){fail('Erro ao exportar JSON',e);}
+  }
+  async function exportCsv(){
+    try{
+      const rows=buildOperationalRows(await snapshot());
+      const headers=['Topico_Titulo','ID_Reuniao_Origem','Data_Reuniao','Descricao_Acao','Prazo','Prazo_Texto','Estado_Acao','Data_Conclusao','Tema_Estado','Orgaos_Tema'];
+      const lines=[headers.join(';'),...rows.map(r=>headers.map(h=>escCsv(r[h])).join(';'))];
+      const stamp=new Date().toISOString().slice(0,10);
+      // BOM para Excel/Power BI reconhecer UTF-8 corretamente
+      download(new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'}),`RCG_acoes_${stamp}.csv`);
+      toast('CSV de ações exportado ✅');
+    }catch(e){fail('Erro ao exportar CSV',e);}
+  }
+  async function exportExcel(){
+    try{
+      if(typeof XLSX==='undefined') throw new Error('A biblioteca XLSX não foi carregada. Verifique a ligação à Internet ou o bloqueio do browser.');
+      const data=await snapshot();
+      const wb=XLSX.utils.book_new();
+      const sheets=[
+        ['Reunioes',data.stores.meetings||[]],
+        ['Participantes',data.stores.meeting_participants||[]],
+        ['Topicos',data.stores.topics||[]],
+        ['Atualizacoes_Topico',data.stores.topic_updates||[]],
+        ['Acoes',buildOperationalRows(data)]
+      ];
+      sheets.forEach(([name,rows])=>{
+        const safe=rows.length?rows:[{Sem_dados:''}];
+        const ws=XLSX.utils.json_to_sheet(safe);
+        XLSX.utils.book_append_sheet(wb,ws,name);
+      });
+      const stamp=new Date().toISOString().slice(0,10);
+      XLSX.writeFile(wb,`RCG_export_${stamp}.xlsx`);
+      toast('Excel exportado ✅');
+    }catch(e){fail('Erro ao exportar Excel',e);}
+  }
+  function icsEsc(s){return String(s??'').replace(/\\/g,'\\\\').replace(/\r?\n/g,'\\n').replace(/,/g,'\\,').replace(/;/g,'\\;');}
+  function icsDate(iso){return /^\d{4}-\d{2}-\d{2}$/.test(iso||'')?iso.replace(/-/g,''):'';}
+  async function exportIcs(){
+    try{
+      const rows=buildOperationalRows(await snapshot());
+      const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//NAV//RCG//PT'];
+      let i=0;
+      for(const r of rows){
+        if(r.Estado_Acao==='Sem ação') continue;
+        const due=isoDeadline({deadlineDate:r.Prazo,deadlineText:r.Prazo_Texto});
+        lines.push('BEGIN:VTODO');
+        lines.push(`UID:rcg-${Date.now()}-${++i}@nav`);
+        lines.push(`DTSTAMP:${new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z')}`);
+        lines.push(`SUMMARY:${icsEsc((r.Topico_Titulo+' — '+r.Descricao_Acao).slice(0,220))}`);
+        lines.push(`DESCRIPTION:${icsEsc('Reunião: '+r.ID_Reuniao_Origem+'\nEstado: '+r.Estado_Acao)}`);
+        if(due) lines.push(`DUE;VALUE=DATE:${due.replace(/-/g,'')}`);
+        lines.push(r.Estado_Acao==='Fechada'?'STATUS:COMPLETED':'STATUS:NEEDS-ACTION');
+        lines.push('END:VTODO');
+      }
+      lines.push('END:VCALENDAR');
+      const stamp=new Date().toISOString().slice(0,10);
+      download(new Blob([lines.join('\r\n')],{type:'text/calendar;charset=utf-8'}),`RCG_acoes_${stamp}.ics`);
+      toast('Calendário ICS exportado ✅');
+    }catch(e){fail('Erro ao exportar calendário',e);}
+  }
+
+  window.addEventListener('load',()=>{
+    const bind=(id,fn)=>{
+      const el=document.getElementById(id); if(!el) return;
+      // captura para funcionar mesmo que exista um listener antigo inútil
+      el.addEventListener('click',e=>{e.preventDefault();e.stopImmediatePropagation();fn();},true);
+    };
+    bind('dataExportExcel',exportExcel);
+    bind('dataExportCsv',exportCsv);
+    bind('dataExportJson',exportJson);
+    bind('dataExportIcs',exportIcs);
+    bind('dataBackup',exportBackup);
+
+    const restoreBtn=document.getElementById('dataRestore');
+    if(restoreBtn){
+      restoreBtn.addEventListener('click',e=>{
+        e.preventDefault();e.stopImmediatePropagation();
+        let input=document.getElementById('directRestoreDbInput');
+        if(!input){
+          input=document.createElement('input'); input.id='directRestoreDbInput'; input.type='file'; input.accept='.json,application/json'; input.style.display='none';
+          input.addEventListener('change',async()=>{const f=input.files&&input.files[0];await restoreBackup(f);input.value='';});
+          document.body.appendChild(input);
+        }
+        input.click();
+      },true);
+    }
   });
 })();
 </script>
